@@ -20,6 +20,17 @@ class Server(BaseHTTPRequestHandler):
         self._set_response()
         self.wfile.write(json.dumps(response_data).encode('utf-8'))
 
+    def do_PUT(self):
+        content_length = int(self.headers['Content-Length'])
+        put_data = json.loads(self.rfile.read(content_length))
+        logging.info("PUT request,\nPath: %s\nHeaders:\n%s\n\nBody:\n%s\n",
+                     str(self.path), str(self.headers), json.dumps(put_data))
+
+        response_data = put_response(put_data)
+
+        self._set_response()
+        self.wfile.write(json.dumps(response_data).encode('utf-8'))
+
     def do_POST(self):
         content_length = int(self.headers['Content-Length'])
         post_data = json.loads(self.rfile.read(content_length))
@@ -49,12 +60,10 @@ def post_response(data):
     global simulation_state
     if 'init' in data and data['init']:
         parameters = {
-            'M': data.get('M', 10),
-            'N': data.get('N', 10),
-            'steps': data.get('steps', 25),
-            'robots': data.get('robots', 5),
-            'objects': data.get('objects', 30),
-            'stacks': data.get('stacks', 0),
+            'x': data.get('x', 10),
+            'y': data.get('y', 10),
+            'drone': data.get('drone', 1),
+            'cameras': data.get('cameras', 2),
         }
         simulation_state = WarehouseModel(parameters)
         simulation_state.setup()
@@ -62,48 +71,20 @@ def post_response(data):
     return {"message": "Use GET request to step through simulation"}
 
 
-def describe_agent(agent):
-    description = {
-        'id': agent.id,
-        'type': agent.agentType,
-    }
-
-    if isinstance(agent, WarehouseAgent):
-        description['carries'] = [describe_agent(obj) for obj in agent.carries]
-    if isinstance(agent, WarehouseStack):
-        description['carries'] = [describe_agent(obj) for obj in agent.content]
-
-    return description
+def put_response(data):
+    global simulation_state
+    if ('step' in data and data['step']) and ('alert' in data and 'location' in data):
+        response_data = get_response(data['alert'], data['location'])
+        return response_data
+    return {"error": "Invalid PUT request"}
 
 
-def clean_grid(grid):
-    if grid is None:
-        return None
-    out = []
-    for row in grid:
-        out_row = []
-        for cell in row:
-            if len(cell) > 1:
-                print(cell)
-            cell = cell[0]
-            if not len(cell):
-                out_row.append(None)
-            else:
-                out_cell = []
-                for agent in cell:
-                    out_cell.append(describe_agent(agent))
-                out_row.append(out_cell)
-        out.append(out_row)
-    return out
-
-
-def get_response():
+def get_response(alert, location):
     global simulation_state
     if simulation_state is None:
         return {"error": "Simulation not initialized. Send a POST request to initialize."}
 
-    step_result = simulation_state.step()
-    step_result = clean_grid(step_result)
+    step_result = simulation_state.step(alert, location)
     if step_result is None:
         return {"message": "Simulation complete"}
     else:

@@ -14,46 +14,45 @@ with onto:
     class Entity(Thing):
         pass
 
-    class Drone(Entity):
-        pass
-
-    class Guard(Entity):
+    class Robot(Entity):
         pass
 
     class Object(Entity):
         pass
 
-    class Camera(Object):
+    class Stack(Object):
         pass
 
-    class Coordinate(Thing):
+    class Place(Thing):
         pass
 
-    class Position(Coordinate):
+    class Position(Place):
         pass
 
     class has_place(ObjectProperty, FunctionalProperty):
         domain = [Entity]
-        range = [Coordinate]
+        range = [Place]
 
     class has_position(DataProperty, FunctionalProperty):
-        domain = [Coordinate]
+        domain = [Place]
         range = [str]
 
-    class controls(ObjectProperty):
-        domain = [Guard]
-        range = [Camera]
+    class carries(ObjectProperty):
+        domain = [Robot]
+        range = [Object]
+
+    Robot.equivalent_to.append(carries.max(5, Object))
 
 
-class WarehouseGuard(ap.Agent):
+class WarehouseAgent(ap.Agent):
     pass
 
 
-class WarehouseDrone(ap.Agent):
+class WarehouseObject(ap.Agent):
     pass
 
 
-class WarehouseCamera(ap.Agent):
+class WarehouseStack(ap.Agent):
     pass
 
 
@@ -81,6 +80,10 @@ def astar(grid, start, goal):
                 if type(location) == np.record:
                     agent_set = location[0]
                     blocked = False
+                    for agent in agent_set:
+                        if isinstance(agent, WarehouseAgent) or isinstance(agent, WarehouseStack):
+                            blocked = True
+                            break
                     if blocked:
                         continue
                 tentative_g_score = g_score[current] + 1
@@ -100,10 +103,6 @@ def heuristic(a, b):
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
-def euclidean(a, b):
-    return np.sqrt((a[0] - b[0])**2 + (a[1] - b[1])**2)
-
-
 def reconstruct_path(came_from, current):
     total_path = [current]
     while current in came_from:
@@ -112,26 +111,34 @@ def reconstruct_path(came_from, current):
     return total_path[::-1]
 
 
-class WarehouseCamera(ap.Agent):
+class WarehouseObject(ap.Agent):
     def setup(self):
         self.agentType = 2
-        self.active = False
+        self.stacked = False
+
+    def step(self):
+        if all(agent.stacked for agent in self.model.objects):
+            self.model.stop()
 
 
-class WarehouseDrone(ap.Agent):
+class WarehouseAgent(ap.Agent):
     def setup(self):
         self.agentType = 0
-        self.x = 0
-        self.y = 0
+        self.direction = (1, 0)
         self.rules = [
+            self.rule_drop,
             self.rule_move,
+            self.rule_pickup
         ]
         self.actions = [
+            self.drop,
             self.move_towards_target,
+            self.pickup,
         ]
+        self.percepts = []
+        self.carries = []
         self.target = None
         self.moves = 0
-        self.alert = False
 
     def see(self):
         x, y = self.model.grid.positions[self]
@@ -158,7 +165,6 @@ class WarehouseDrone(ap.Agent):
         return act == self.move_towards_target
 
     def move(self, target):
-        # TODO Change to direct movement from grid based
         x, y = self.model.grid.positions[self]
 
         while True:
@@ -166,12 +172,51 @@ class WarehouseDrone(ap.Agent):
             dx, dy = self.direction
             if x + dx == nx and y + dy == ny:
                 break
+            self.rotate_left()
 
         self.model.grid.move_by(self, self.direction)
         self.moves += 1
 
+    def rotate_left(self):
+        self.direction = (self.direction[1], -self.direction[0])
+
+    def pickup(self):
+        for obj in self.percepts:
+            if self.target == obj:
+                self.carries.append(obj)
+                obj.stacked = True
+                self.model.grid.remove_agents(obj)
+                self.target = None
+                break
+
+    def rule_pickup(self, act):
+        if act == self.pickup:
+            if self.target in self.percepts and len(self.carries) < 5:
+                return True
+        return False
+
+    def drop(self):
+        x, y = self.model.grid.positions[self]
+        nx, ny = self.direction
+
+        # drop objects as a stack
+        stack = WarehouseStack(self.model)
+        self.model.stacks.append(stack)
+        self.model.grid.add_agents([stack], positions=[(x + nx, y + ny)])
+        stack.stack = self.carries
+        self.carries = []
+
+    def rule_drop(self, act):
+        if act == self.drop:
+            if len(self.carries) >= 5:
+                return True
+
     def find_nearest_object(self):
-        # TODO Adapt pathfinding to use euclidean distance
+        for obj in self.percepts:
+            if isinstance(obj, WarehouseObject):
+                self.target = obj
+                return
+
         closest_object = None
         shortest_path = None
 
@@ -188,34 +233,27 @@ class WarehouseDrone(ap.Agent):
         self.target = closest_object
         return shortest_path
 
-    def patrol(self):
-        pass
-
     def move_towards_target(self):
-        if self.alert:
-            path = self.find_nearest_object()
-        else:
-            path = self.patrol()
+        path = self.find_nearest_object()
         if path and len(path) > 1:
             next_position = path[1]
             self.move(next_position)
 
 
-class WarehouseGuard(ap.Agent):
+class WarehouseStack(ap.Agent):
     def setup(self):
-        self.agentType = 0
-        self.alert = False
-        self.controlling_camera = None
+        self.agentType = 1
+        self.content = []
 
 
 class WarehouseModel(ap.Model):
-    def setup(self, x, y):
-        self.drones = ap.AgentList(self, self.p.drones, WarehouseDrone)
-        self.cameras = ap.AgentList(self, self.p.cameras, WarehouseCamera)
-        self.guard = ap.AgentList(self, self.p.guards, WarehouseGuard)
-
-        # add in specific locations
-
+    def setup(self):
+        self.grid = ap.Grid(self, (self.p.M, self.p.N), track_empty=True)
+        self.robots = ap.AgentList(self, self.p.robots, WarehouseAgent)
+        self.objects = ap.AgentList(self, self.p.objects, WarehouseObject)
+        self.stacks = ap.AgentList(self, self.p.stacks, WarehouseStack)
+        self.grid.add_agents(self.robots, random=True, empty=True)
+        self.grid.add_agents(self.objects, random=True, empty=True)
         self.steps = 0
 
     def step(self):
@@ -223,20 +261,44 @@ class WarehouseModel(ap.Model):
         self.steps += 1
         return self.grid.grid
 
-    def get_positions(self):
-        pass
-
     def end(self):
         return {
             'steps': self.steps,
-            'positions': self.get_positions()
+            'moves': [agent.moves for agent in self.robots]
         }
+
+
+def animation_plot(model, ax):
+    agent_type_grid = model.grid.attr_grid('agentType')
+    ap.gridplot(agent_type_grid, cmap='Accent', ax=ax)
+
+    for agent in model.robots:
+        if isinstance(agent, WarehouseAgent) and model.grid.positions:
+            try:
+                x, y = model.grid.positions[agent]
+            except KeyError:
+                continue
+            ax.text(y, x, len(agent.carries), ha='center',
+                    va='center', color='black')
+        elif isinstance(agent, WarehouseObject):
+            try:
+                x, y = model.grid.positions[agent]
+            except KeyError:
+                continue
+
+    ax.set_title(f"Warehouse Model \n Time-step: {model.t}")
 
 
 # SIMULATION:
 
 
 # parameters = {
+#     'M': 10,
+#     'N': 10,
+#     "steps": 25,
+#     'robots': 5,
+#     'objects': 30,
+#     'stacks': 0,
 # }
 
 
